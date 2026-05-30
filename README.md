@@ -23,7 +23,19 @@ when Blink changes its API. This bridge delegates the current OAuth/PKCE flow to
 `/thumbnail` downloads the existing Blink thumbnail. `/snapshot` asks Blink for
 a fresh picture first, waits briefly, and then downloads the thumbnail.
 
-## Deployment
+## Docker Image
+
+The repository publishes a multi-arch image for `linux/amd64` and
+`linux/arm64`:
+
+```text
+ghcr.io/mrstrategy/fhem-blink-bridge:latest
+```
+
+For Raspberry Pi deployments this means you usually do not need to build
+anything locally.
+
+## Setup Token File
 
 Create a token file once with `blinkpy` and store it as:
 
@@ -31,13 +43,77 @@ Create a token file once with `blinkpy` and store it as:
 data/blink_login.json
 ```
 
-Then configure `.env` from `.env.example` and run:
+The file contains Blink OAuth tokens and must not be committed. Keep it private
+and readable only by the bridge user.
+
+One practical setup flow is to run a temporary Python environment, log in with
+`blinkpy`, complete 2FA, and save the resulting login file as
+`data/blink_login.json`.
+
+## Deployment With Docker
+
+Copy `.env.example` to `.env` and adjust values if needed:
+
+```sh
+cp .env.example .env
+mkdir -p data
+```
+
+Put `blink_login.json` into `data/`, then start the bridge:
 
 ```sh
 docker compose up -d --build
 ```
 
+The default `docker-compose.yml` uses the published GHCR image:
+
+```yaml
+image: ghcr.io/mrstrategy/fhem-blink-bridge:latest
+```
+
 The default HTTP port is `8766`.
+
+### Build The Docker Image Locally
+
+If you want to build on the target machine instead of using GHCR:
+
+```sh
+docker compose -f docker-compose.build.yml up -d --build
+```
+
+Or manually:
+
+```sh
+docker build -t fhem-blink-bridge:0.1.0 .
+docker run --rm --network host \
+  --env-file .env \
+  -v "$PWD/data:/data" \
+  fhem-blink-bridge:0.1.0
+```
+
+## Deployment Without Docker
+
+Use Python 3.11 or newer.
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+pip install .
+cp .env.example .env
+mkdir -p data
+```
+
+Put `blink_login.json` into `data/`, then run:
+
+```sh
+BLINK_DATA_FILE="$PWD/data/blink_login.json" \
+HTTP_HOST=0.0.0.0 \
+HTTP_PORT=8766 \
+fhem-blink-bridge
+```
+
+For a permanent non-Docker installation, run the command from a systemd service
+and set the same environment variables there.
 
 ## FHEM
 

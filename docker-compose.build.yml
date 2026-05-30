@@ -1,6 +1,7 @@
 services:
   blink-bridge:
-    image: ghcr.io/mrstrategy/fhem-blink-bridge:latest
+    build: .
+    image: fhem-blink-bridge:0.1.0
     container_name: blink-bridge
     restart: unless-stopped
     network_mode: host
