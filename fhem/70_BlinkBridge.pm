@@ -28,7 +28,7 @@ sub BlinkBridge_Initialize {
   $hash->{SetFn}    = 'BlinkBridge_Set';
   $hash->{GetFn}    = 'BlinkBridge_Get';
   $hash->{AttrFn}   = 'BlinkBridge_Attr';
-  $hash->{AttrList} = 'disable:0,1 disabledForIntervals interval timeout imagePath ' . $readingFnAttributes;
+  $hash->{AttrList} = 'disable:0,1 disabledForIntervals interval timeout imagePath videoPath ' . $readingFnAttributes;
 
   return undef;
 }
@@ -101,7 +101,7 @@ sub BlinkBridge_Set {
   my ($name, $cmd, @args) = @a;
   my $choices = BlinkBridge_Choices();
   return "Unknown argument $cmd, choose one of $choices"
-    if $cmd eq '?' || $cmd !~ m/^(update|arm|thumbnail|snapshot)$/;
+    if $cmd eq '?' || $cmd !~ m/^(update|arm|thumbnail|snapshot|video)$/;
 
   return 'device is disabled' if IsDisabled($name);
 
@@ -122,6 +122,11 @@ sub BlinkBridge_Set {
 
   return "set $cmd needs a camera name or id" if @args != 1;
   readingsSingleUpdate($hash, 'last_command', "$cmd $args[0]", 1);
+  if ($cmd eq 'video') {
+    BlinkBridge_RequestVideo($hash, $args[0]);
+    return undef;
+  }
+
   BlinkBridge_RequestImage($hash, $cmd, $args[0]);
   return undef;
 }
@@ -131,9 +136,9 @@ sub BlinkBridge_Get {
   return 'no get argument specified' if @a < 2;
 
   my ($name, $cmd, @args) = @a;
-  my $choices = 'update:noArg state:noArg thumbnail:textField snapshot:textField';
+  my $choices = 'update:noArg state:noArg thumbnail:textField snapshot:textField video:textField';
   return "Unknown argument $cmd, choose one of $choices"
-    if $cmd eq '?' || $cmd !~ m/^(update|state|thumbnail|snapshot)$/;
+    if $cmd eq '?' || $cmd !~ m/^(update|state|thumbnail|snapshot|video)$/;
 
   return ReadingsVal($name, 'state', 'unknown') if $cmd eq 'state';
   return 'device is disabled' if IsDisabled($name);
@@ -145,12 +150,17 @@ sub BlinkBridge_Get {
   }
 
   return "get $cmd needs a camera name or id" if @args != 1;
+  if ($cmd eq 'video') {
+    BlinkBridge_RequestVideo($hash, $args[0]);
+    return "$cmd request sent for $args[0]";
+  }
+
   BlinkBridge_RequestImage($hash, $cmd, $args[0]);
   return "$cmd request sent for $args[0]";
 }
 
 sub BlinkBridge_Choices {
-  return 'update:noArg arm:on,off thumbnail:textField snapshot:textField';
+  return 'update:noArg arm:on,off thumbnail:textField snapshot:textField video:textField';
 }
 
 sub BlinkBridge_NormalizeBool {
@@ -256,6 +266,33 @@ sub BlinkBridge_RequestImage {
   return undef;
 }
 
+sub BlinkBridge_RequestVideo {
+  my ($hash, $camera) = @_;
+  my $name = $hash->{NAME};
+  my $safeDevice = BlinkBridge_SafeName($name);
+  my $safeCamera = BlinkBridge_SafeName($camera);
+  my $filename = "BlinkBridge_${safeDevice}_video_${safeCamera}.mp4";
+  my $path = BlinkBridge_VideoPath($hash) . '/' . $filename;
+  my $url = $hash->{BASE_URL} . '/video?camera=' . BlinkBridge_UrlEncode($camera);
+
+  my $param = {
+    url              => $url,
+    timeout          => BlinkBridge_Timeout($hash) + 120,
+    method           => 'GET',
+    keepalive        => 1,
+    name             => $name,
+    reason           => 'video',
+    videoCamera      => $camera,
+    videoSafeCamera  => $safeCamera,
+    videoFile        => $path,
+    videoAttachment  => $filename,
+    callback         => \&BlinkBridge_VideoResponse,
+  };
+
+  HttpUtils_NonblockingGet($param);
+  return undef;
+}
+
 sub BlinkBridge_Response {
   my ($param, $err, $data) = @_;
   my $name = $param->{name};
@@ -325,6 +362,57 @@ sub BlinkBridge_ImageResponse {
   readingsBulkUpdate($hash, "camera_${safeCamera}_updated", $imageUpdated);
   readingsBulkUpdate($hash, "camera_${safeCamera}_file", $path);
   readingsBulkUpdate($hash, "camera_${safeCamera}_attachment", $param->{imageAttachment});
+  readingsBulkUpdateIfChanged($hash, 'last_error', 'none');
+  readingsEndUpdate($hash, 1);
+
+  return undef;
+}
+
+sub BlinkBridge_VideoResponse {
+  my ($param, $err, $data) = @_;
+  my $name = $param->{name};
+  my $hash = $defs{$name};
+  return undef if !$hash;
+
+  if ($err) {
+    BlinkBridge_UpdateError($hash, $err);
+    return undef;
+  }
+
+  if (!defined($data) || $data eq '') {
+    BlinkBridge_UpdateError($hash, 'empty video response');
+    return undef;
+  }
+
+  if ($data =~ m/^\s*\{/) {
+    my $json = eval { JSON::PP::decode_json($data) };
+    my $message = ref($json) eq 'HASH' && defined($json->{error})
+      ? $json->{error}
+      : 'invalid video response';
+    BlinkBridge_UpdateCommandError($hash, $message);
+    return undef;
+  }
+
+  my $path = $param->{videoFile};
+  my $fh;
+  if (!open($fh, '>', $path)) {
+    BlinkBridge_UpdateError($hash, "cannot write video file $path: $!");
+    return undef;
+  }
+  binmode($fh);
+  print {$fh} $data;
+  close($fh);
+
+  my $safeCamera = $param->{videoSafeCamera};
+  my $videoUpdated = sprintf('%.3f', scalar(gettimeofday()));
+  readingsBeginUpdate($hash);
+  readingsBulkUpdate($hash, 'last_video_updated', $videoUpdated);
+  readingsBulkUpdate($hash, 'last_video_camera', $param->{videoCamera});
+  readingsBulkUpdate($hash, 'last_video_file', $path);
+  readingsBulkUpdate($hash, 'last_video_attachment', $param->{videoAttachment});
+  readingsBulkUpdate($hash, "camera_${safeCamera}_video_updated", $videoUpdated);
+  readingsBulkUpdate($hash, "camera_${safeCamera}_video_file", $path);
+  readingsBulkUpdate($hash, "camera_${safeCamera}_video_attachment", $param->{videoAttachment});
   readingsBulkUpdateIfChanged($hash, 'last_error', 'none');
   readingsEndUpdate($hash, 1);
 
@@ -401,6 +489,16 @@ sub BlinkBridge_UpdateError {
   return undef;
 }
 
+sub BlinkBridge_UpdateCommandError {
+  my ($hash, $message) = @_;
+  my $name = $hash->{NAME};
+
+  Log3($name, 3, "BlinkBridge ($name) $message");
+  readingsSingleUpdate($hash, 'last_error', $message, 1);
+
+  return undef;
+}
+
 sub BlinkBridge_StateText {
   my ($data) = @_;
   my $availability = $data->{availability} // 'unknown';
@@ -454,6 +552,14 @@ sub BlinkBridge_ImagePath {
   return $path || $BlinkBridge_DefaultImagePath;
 }
 
+sub BlinkBridge_VideoPath {
+  my ($hash) = @_;
+  my $name = $hash->{NAME};
+  my $path = AttrVal($name, 'videoPath', BlinkBridge_ImagePath($hash));
+  $path =~ s{/+$}{};
+  return $path || BlinkBridge_ImagePath($hash);
+}
+
 sub BlinkBridge_UrlEncode {
   my ($value) = @_;
   $value = '' if !defined($value);
@@ -501,6 +607,10 @@ sub BlinkBridge_SafeName {
       Downloads the current thumbnail into <code>imagePath</code>.</li>
     <li><code>set &lt;name&gt; snapshot &lt;camera&gt;</code><br>
       Requests a fresh Blink picture and downloads it into <code>imagePath</code>.</li>
+    <li><code>set &lt;name&gt; video &lt;camera&gt;</code><br>
+      Downloads the newest MP4 clip for the camera from the last 24 hours into
+      <code>videoPath</code>, or <code>imagePath</code> when <code>videoPath</code>
+      is not set.</li>
     <li><code>set &lt;name&gt; update</code><br>
       Requests a state refresh.</li>
   </ul>
@@ -516,6 +626,7 @@ sub BlinkBridge_SafeName {
     <li><code>camera_..._motion_enabled</code>, <code>camera_..._battery</code>,
       <code>camera_..._temperature_c</code>: camera details.</li>
     <li><code>last_image_file</code>, <code>last_image_attachment</code>: last downloaded image.</li>
+    <li><code>last_video_file</code>, <code>last_video_attachment</code>: last downloaded video.</li>
   </ul>
   <br>
 
@@ -525,6 +636,7 @@ sub BlinkBridge_SafeName {
     <li><code>interval</code>: poll interval in seconds. Default: 60.</li>
     <li><code>timeout</code>: HTTP timeout in seconds. Default: 15.</li>
     <li><code>imagePath</code>: target directory for downloaded images. Default: <code>/tmp</code>.</li>
+    <li><code>videoPath</code>: target directory for downloaded videos. Default: <code>imagePath</code>.</li>
     <li><code>disable</code>, <code>disabledForIntervals</code>.</li>
     <li><a href="#readingFnAttributes">readingFnAttributes</a></li>
   </ul>
@@ -557,6 +669,10 @@ sub BlinkBridge_SafeName {
       Laedt das aktuelle Vorschaubild nach <code>imagePath</code>.</li>
     <li><code>set &lt;name&gt; snapshot &lt;camera&gt;</code><br>
       Fordert ein frisches Blink Bild an und laedt es nach <code>imagePath</code>.</li>
+    <li><code>set &lt;name&gt; video &lt;camera&gt;</code><br>
+      Laedt den neuesten MP4-Clip der Kamera aus den letzten 24 Stunden nach
+      <code>videoPath</code>, oder nach <code>imagePath</code> wenn
+      <code>videoPath</code> nicht gesetzt ist.</li>
     <li><code>set &lt;name&gt; update</code><br>
       Fordert sofort einen Status an.</li>
   </ul>
@@ -572,6 +688,7 @@ sub BlinkBridge_SafeName {
     <li><code>camera_..._motion_enabled</code>, <code>camera_..._battery</code>,
       <code>camera_..._temperature_c</code>: Kameradetails.</li>
     <li><code>last_image_file</code>, <code>last_image_attachment</code>: zuletzt geladenes Bild.</li>
+    <li><code>last_video_file</code>, <code>last_video_attachment</code>: zuletzt geladenes Video.</li>
   </ul>
   <br>
 
@@ -581,6 +698,7 @@ sub BlinkBridge_SafeName {
     <li><code>interval</code>: Poll-Intervall in Sekunden. Default: 60.</li>
     <li><code>timeout</code>: HTTP-Timeout in Sekunden. Default: 15.</li>
     <li><code>imagePath</code>: Zielverzeichnis fuer heruntergeladene Bilder. Default: <code>/tmp</code>.</li>
+    <li><code>videoPath</code>: Zielverzeichnis fuer heruntergeladene Videos. Default: <code>imagePath</code>.</li>
     <li><code>disable</code>, <code>disabledForIntervals</code>.</li>
     <li><a href="#readingFnAttributes">readingFnAttributes</a></li>
   </ul>

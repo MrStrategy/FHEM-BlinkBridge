@@ -9,7 +9,7 @@ import signal
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -28,6 +28,7 @@ _LOGGER = logging.getLogger(__name__)
 class Config:
     data_file: Path
     image_dir: Path
+    video_dir: Path
     http_host: str
     http_port: int
     poll_interval: int
@@ -42,6 +43,9 @@ class Config:
         return cls(
             data_file=data_file,
             image_dir=Path(os.getenv("IMAGE_DIR", str(data_file.parent / "images"))),
+            video_dir=Path(
+                os.getenv("VIDEO_DIR", os.getenv("IMAGE_DIR", str(data_file.parent / "images")))
+            ),
             http_host=os.getenv("HTTP_HOST", "0.0.0.0"),
             http_port=int(os.getenv("HTTP_PORT", "8766")),
             poll_interval=int(os.getenv("POLL_INTERVAL", "60")),
@@ -201,6 +205,43 @@ class BlinkService:
         path.write_bytes(data)
         return data, path
 
+    async def get_latest_video(
+        self, camera: str, since_hours: int = 24
+    ) -> tuple[bytes, Path, dict[str, Any]]:
+        assert self.blink is not None
+        cam = self._find_camera(camera)
+        since = (datetime.now(timezone.utc) - timedelta(hours=since_hours)).strftime(
+            "%Y/%m/%d %H:%M:%S"
+        )
+        videos = await self.blink.get_videos_metadata(since=since, stop=4)
+        matches = [
+            item
+            for item in videos
+            if not item.get("deleted")
+            and str(item.get("device_name", "")).casefold() == cam.name.casefold()
+            and item.get("media")
+        ]
+        matches.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
+        if not matches:
+            raise RuntimeError(f"No video available for {cam.name} in the last {since_hours} hours")
+
+        item = matches[0]
+        response = await self.blink.do_http_get(item["media"])
+        if response is None:
+            raise RuntimeError(f"Video request failed for {cam.name}")
+        if response.status != 200:
+            raise RuntimeError(f"Video request failed for {cam.name}: HTTP {response.status}")
+
+        data = await response.read()
+        if not data:
+            raise RuntimeError(f"Video response for {cam.name} was empty")
+
+        self.config.video_dir.mkdir(parents=True, exist_ok=True)
+        created = _safe_name(str(item.get("created_at") or _utc_now()))
+        path = self.config.video_dir / f"{created}_{_safe_name(cam.name)}.mp4"
+        path.write_bytes(data)
+        return data, path, _video_summary(item)
+
     def _find_sync(self, network: str | None):
         assert self.blink is not None
         if not self.blink.sync:
@@ -318,6 +359,26 @@ class Handler(BaseHTTPRequestHandler):
                 refresh = parsed.path == "/snapshot"
                 data, path = self._submit(self.server.service.get_image(camera, refresh))
                 self._send_binary(HTTPStatus.OK, data, "image/jpeg", {"X-BlinkBridge-Path": str(path)})
+                return
+
+            if parsed.path == "/video":
+                camera = _last(query, "camera")
+                if not camera:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Missing camera parameter"})
+                    return
+                since_hours = int(_last(query, "since_hours") or "24")
+                data, path, video = self._submit(
+                    self.server.service.get_latest_video(camera, since_hours)
+                )
+                self._send_binary(
+                    HTTPStatus.OK,
+                    data,
+                    "video/mp4",
+                    {
+                        "X-BlinkBridge-Path": str(path),
+                        "X-BlinkBridge-Video": json.dumps(video, sort_keys=True),
+                    },
+                )
                 return
 
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
@@ -438,3 +499,8 @@ def _jsonable(value: Any) -> Any:
         return json.loads(json.dumps(value))
     except TypeError:
         return str(value)
+
+
+def _video_summary(item: dict[str, Any]) -> dict[str, Any]:
+    keys = ("id", "created_at", "device_name", "network_name", "duration", "size")
+    return {key: _jsonable(item.get(key)) for key in keys if key in item}

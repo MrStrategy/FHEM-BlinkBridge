@@ -19,9 +19,12 @@ when Blink changes its API. This bridge delegates the current OAuth/PKCE flow to
 - `GET /set?arm=on|off[&network=<name>]`
 - `GET /thumbnail?camera=<name-or-id>`
 - `GET /snapshot?camera=<name-or-id>`
+- `GET /video?camera=<name-or-id>[&since_hours=24]`
 
 `/thumbnail` downloads the existing Blink thumbnail. `/snapshot` asks Blink for
 a fresh picture first, waits briefly, and then downloads the thumbnail.
+`/video` downloads the newest available MP4 clip for the camera from the last
+24 hours by default.
 
 ## Docker Image
 
@@ -135,6 +138,7 @@ set blink.bridge arm off
 get blink.bridge update
 get blink.bridge thumbnail AussenVorne
 get blink.bridge snapshot AussenVorne
+get blink.bridge video AussenVorne
 ```
 
 For Pushover attachments, keep `imagePath` aligned with the FHEM Pushover
