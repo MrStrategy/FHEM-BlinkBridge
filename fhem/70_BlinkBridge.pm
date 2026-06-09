@@ -14,7 +14,7 @@ our $readingFnAttributes;
 our %defs;
 our $init_done;
 
-my $BlinkBridge_Version = '0.1.0';
+my $BlinkBridge_Version = '0.1.1';
 my $BlinkBridge_DefaultInterval = 60;
 my $BlinkBridge_DefaultTimeout = 15;
 my $BlinkBridge_DefaultImagePath = '/tmp';

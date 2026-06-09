@@ -33,6 +33,7 @@ class Config:
     http_port: int
     poll_interval: int
     snapshot_delay: float
+    snapshot_timeout: float
     username: str | None
     password: str | None
     hardware_id: str | None
@@ -50,6 +51,7 @@ class Config:
             http_port=int(os.getenv("HTTP_PORT", "8766")),
             poll_interval=int(os.getenv("POLL_INTERVAL", "60")),
             snapshot_delay=float(os.getenv("SNAPSHOT_DELAY", "2")),
+            snapshot_timeout=float(os.getenv("SNAPSHOT_TIMEOUT", "30")),
             username=os.getenv("BLINK_USERNAME") or None,
             password=os.getenv("BLINK_PASSWORD") or None,
             hardware_id=os.getenv("BLINK_HARDWARE_ID") or None,
@@ -186,9 +188,7 @@ class BlinkService:
         assert self.blink is not None
         cam = self._find_camera(camera)
         if refresh:
-            await cam.snap_picture()
-            if self.config.snapshot_delay > 0:
-                await asyncio.sleep(self.config.snapshot_delay)
+            cam = await self._request_fresh_snapshot(cam)
 
         response = await cam.get_media()
         if response is None:
@@ -204,6 +204,30 @@ class BlinkService:
         path = self.config.image_dir / f"{_safe_name(cam.name)}.jpg"
         path.write_bytes(data)
         return data, path
+
+    async def _request_fresh_snapshot(self, cam):
+        assert self.blink is not None
+        previous_thumbnail = cam.attributes.get("thumbnail")
+        await cam.snap_picture()
+
+        poll_interval = self.config.snapshot_delay if self.config.snapshot_delay > 0 else 2
+        deadline = time.monotonic() + max(self.config.snapshot_timeout, poll_interval)
+        refreshed = cam
+
+        while True:
+            await asyncio.sleep(poll_interval)
+            await self.blink.refresh(force=True)
+            refreshed = self._find_camera(cam.name)
+            current_thumbnail = refreshed.attributes.get("thumbnail")
+            if current_thumbnail and current_thumbnail != previous_thumbnail:
+                return refreshed
+            if time.monotonic() >= deadline:
+                _LOGGER.warning(
+                    "Snapshot thumbnail for %s did not change within %.1fs",
+                    cam.name,
+                    self.config.snapshot_timeout,
+                )
+                return refreshed
 
     async def get_latest_video(
         self, camera: str, since_hours: int = 24

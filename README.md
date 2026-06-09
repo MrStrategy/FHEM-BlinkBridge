@@ -22,7 +22,8 @@ when Blink changes its API. This bridge delegates the current OAuth/PKCE flow to
 - `GET /video?camera=<name-or-id>[&since_hours=24]`
 
 `/thumbnail` downloads the existing Blink thumbnail. `/snapshot` asks Blink for
-a fresh picture first, waits briefly, and then downloads the thumbnail.
+a fresh picture first, refreshes Blink metadata until the thumbnail changes or
+`SNAPSHOT_TIMEOUT` is reached, and then downloads the thumbnail.
 `/video` downloads the newest available MP4 clip for the camera from the last
 24 hours by default.
 
@@ -87,11 +88,11 @@ docker compose -f docker-compose.build.yml up -d --build
 Or manually:
 
 ```sh
-docker build -t fhem-blink-bridge:0.1.0 .
+docker build -t fhem-blink-bridge:0.1.1 .
 docker run --rm --network host \
   --env-file .env \
   -v "$PWD/data:/data" \
-  fhem-blink-bridge:0.1.0
+  fhem-blink-bridge:0.1.1
 ```
 
 ## Deployment Without Docker
@@ -143,6 +144,16 @@ get blink.bridge video AussenVorne
 
 For Pushover attachments, keep `imagePath` aligned with the FHEM Pushover
 module `storagePath`, commonly `/tmp`.
+
+Snapshot freshness is controlled by:
+
+```text
+SNAPSHOT_DELAY=2
+SNAPSHOT_TIMEOUT=30
+```
+
+The bridge polls every `SNAPSHOT_DELAY` seconds after requesting a snapshot and
+waits at most `SNAPSHOT_TIMEOUT` seconds for Blink to publish a new thumbnail.
 
 Example notify for a fresh image:
 
